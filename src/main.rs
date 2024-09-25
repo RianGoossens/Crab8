@@ -1,11 +1,13 @@
 use crossterm::{
-    cursor, queue,
+    cursor, execute, queue,
     style::{self, Stylize},
     terminal,
 };
 use std::{
     fs,
     io::{self, stdout, Write},
+    thread,
+    time::{Duration, Instant},
 };
 
 pub struct Chip8State {
@@ -40,7 +42,17 @@ impl Chip8State {
     }
 }
 
-pub struct Chip8Interpreter;
+pub struct Chip8Interpreter {
+    pub max_clock_speed: u32,
+}
+
+impl Default for Chip8Interpreter {
+    fn default() -> Self {
+        Self {
+            max_clock_speed: 700,
+        }
+    }
+}
 
 impl Chip8Interpreter {
     pub fn run(&self, path: &str) -> io::Result<()> {
@@ -51,7 +63,17 @@ impl Chip8Interpreter {
 
         state.load_program(program);
 
+        let cpu_frame_time = 1. / self.max_clock_speed as f32;
+
+        execute!(
+            stdout,
+            terminal::Clear(terminal::ClearType::All),
+            cursor::Hide
+        )?;
+
         loop {
+            let start_cpu_frame_time = Instant::now();
+
             //fetch
             let byte_a = state.ram[state.program_counter as usize];
             let byte_b = state.ram[state.program_counter as usize + 1];
@@ -186,16 +208,7 @@ impl Chip8Interpreter {
                                 pixel_cleared = true;
                             }
                             state.display[display_index] ^= flip;
-                        }
-                    }
-                    state.data_registers[0xF] = pixel_cleared as u8;
-
-                    queue!(stdout, terminal::Clear(terminal::ClearType::All))?;
-
-                    for row in 0..32 {
-                        for col in 0..64 {
-                            let display_index = (row as usize) * 64 + col as usize;
-                            queue!(stdout, cursor::MoveTo(col * 2, row))?;
+                            queue!(stdout, cursor::MoveTo(col as u16 * 2, row as u16))?;
                             if state.display[display_index] {
                                 queue!(stdout, style::PrintStyledContent("██".yellow()))?
                             } else {
@@ -203,6 +216,8 @@ impl Chip8Interpreter {
                             }
                         }
                     }
+
+                    state.data_registers[0xF] = pixel_cleared as u8;
 
                     stdout.flush()?;
                 }
@@ -237,14 +252,22 @@ impl Chip8Interpreter {
                 }
                 _ => {}
             }
+
+            let time_passed = start_cpu_frame_time.elapsed().as_secs_f32();
+
+            let wait_time = (cpu_frame_time - time_passed).max(0.);
+
+            thread::sleep(Duration::from_secs_f32(wait_time));
         }
     }
 }
 
 fn main() -> io::Result<()> {
-    let interpreter = Chip8Interpreter;
+    let interpreter = Chip8Interpreter {
+        max_clock_speed: 700,
+    };
 
-    interpreter.run("testroms/4-flags.ch8")?;
+    interpreter.run("testroms/1-chip8-logo.ch8")?;
 
     Ok(())
 }

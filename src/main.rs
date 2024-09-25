@@ -40,6 +40,18 @@ impl Chip8State {
             self.ram[0x200 + i] = *byte;
         }
     }
+
+    pub fn register(&self, register_index: u8) -> u8 {
+        self.data_registers[register_index as usize]
+    }
+
+    pub fn register_mut(&mut self, register_index: u8) -> &mut u8 {
+        &mut self.data_registers[register_index as usize]
+    }
+
+    pub fn set_flag(&mut self, flag: bool) {
+        *self.register_mut(0xF) = flag as u8;
+    }
 }
 
 pub struct Chip8Interpreter {
@@ -87,8 +99,8 @@ impl Chip8Interpreter {
 
             let address = ((nibble_1 as u16) << 8) | byte_b as u16;
 
-            let register_x = nibble_1;
-            let register_y = nibble_2;
+            let vx = nibble_1;
+            let vy = nibble_2;
             let immediate_value = byte_b;
 
             match [nibble_0, nibble_1, nibble_2, nibble_3] {
@@ -109,92 +121,72 @@ impl Chip8Interpreter {
                 }
                 //skip if Vx == NN
                 [0x3, _, _, _] => {
-                    if state.data_registers[register_x as usize] == byte_b {
+                    if state.register(vx) == byte_b {
                         state.program_counter += 2;
                     }
                 }
                 //skip if Vx != NN
                 [0x4, _, _, _] => {
-                    if state.data_registers[register_x as usize] != byte_b {
+                    if state.register(vx) != byte_b {
                         state.program_counter += 2;
                     }
                 }
                 //skip if Vx == Vy
                 [0x5, _, _, _] => {
-                    if state.data_registers[register_x as usize]
-                        == state.data_registers[register_y as usize]
-                    {
+                    if state.register(vx) == state.register(vy) {
                         state.program_counter += 2;
                     }
                 }
                 //Vx = value
-                [0x6, _, _, _] => state.data_registers[register_x as usize] = immediate_value,
+                [0x6, _, _, _] => *state.register_mut(vx) = immediate_value,
                 //Vx += value
                 [0x7, _, _, _] => {
-                    state.data_registers[register_x as usize] =
-                        state.data_registers[register_x as usize].wrapping_add(immediate_value)
+                    *state.register_mut(vx) = state.register(vx).wrapping_add(immediate_value)
                 }
                 //Vx = Vy
-                [0x8, _, _, 0x0] => {
-                    state.data_registers[register_x as usize] =
-                        state.data_registers[register_y as usize]
-                }
+                [0x8, _, _, 0x0] => *state.register_mut(vx) = state.register(vy),
                 //Vx |= Vy
-                [0x8, _, _, 0x1] => {
-                    state.data_registers[register_x as usize] |=
-                        state.data_registers[register_y as usize]
-                }
+                [0x8, _, _, 0x1] => *state.register_mut(vx) |= state.register(vy),
                 //Vx &= Vy
-                [0x8, _, _, 0x2] => {
-                    state.data_registers[register_x as usize] &=
-                        state.data_registers[register_y as usize]
-                }
+                [0x8, _, _, 0x2] => *state.register_mut(vx) &= state.register(vy),
                 //Vx ^= Vy
-                [0x8, _, _, 0x3] => {
-                    state.data_registers[register_x as usize] ^=
-                        state.data_registers[register_y as usize]
-                }
+                [0x8, _, _, 0x3] => *state.register_mut(vx) ^= state.register(vy),
                 //Vx += Vy
                 [0x8, _, _, 0x4] => {
-                    let (result, overflow) = state.data_registers[register_x as usize]
-                        .overflowing_add(state.data_registers[register_y as usize]);
-                    state.data_registers[register_x as usize] = result;
-                    state.data_registers[0xF] = overflow as u8;
+                    let (result, overflow) = state.register(vx).overflowing_add(state.register(vy));
+                    *state.register_mut(vx) = result;
+                    state.set_flag(overflow);
                 }
                 //Vx -= Vy
                 [0x8, _, _, 0x5] => {
-                    let (result, borrow) = state.data_registers[register_x as usize]
-                        .overflowing_sub(state.data_registers[register_y as usize]);
-                    state.data_registers[register_x as usize] = result;
-                    state.data_registers[0xF] = !borrow as u8;
+                    let (result, borrow) = state.register(vx).overflowing_sub(state.register(vy));
+                    *state.register_mut(vx) = result;
+                    state.set_flag(!borrow);
                 }
                 //Vx >>= 1
                 [0x8, _, _, 0x6] => {
-                    let (result, borrow) =
-                        state.data_registers[register_x as usize].overflowing_shr(1);
-                    state.data_registers[register_x as usize] = result;
-                    state.data_registers[0xF] = !borrow as u8;
+                    let (result, borrow) = state.register(vx).overflowing_shr(1);
+                    *state.register_mut(vx) = result;
+                    state.set_flag(!borrow);
                 }
                 //Vx = Vy - Vx
                 [0x8, _, _, 0x7] => {
-                    let (result, borrow) = state.data_registers[register_y as usize]
-                        .overflowing_sub(state.data_registers[register_x as usize]);
-                    state.data_registers[register_x as usize] = result;
-                    state.data_registers[0xF] = !borrow as u8;
+                    let (result, borrow) = state.register(vy).overflowing_sub(state.register(vx));
+                    *state.register_mut(vx) = result;
+                    state.set_flag(!borrow);
                 }
                 //Vx <<= 1
                 [0x8, _, _, 0xE] => {
-                    let (result, borrow) =
-                        state.data_registers[register_x as usize].overflowing_shl(1);
-                    state.data_registers[register_x as usize] = result;
-                    state.data_registers[0xF] = !borrow as u8;
+                    let (result, borrow) = state.register(vx).overflowing_shl(1);
+                    *state.register_mut(vx) = result;
+                    state.set_flag(!borrow);
                 }
                 //I = address
                 [0xA, _, _, _] => state.index_register = address,
                 //Display sprite
                 [0xD, _, _, _] => {
-                    let vx = state.data_registers[register_x as usize];
-                    let vy = state.data_registers[register_y as usize];
+                    let vx = state.register(vx);
+                    let vy = state.register(vy);
                     let mut pixel_cleared = false;
                     for i in 0..nibble_3 {
                         let to_draw = state.ram[state.index_register as usize + i as usize];
@@ -217,7 +209,7 @@ impl Chip8Interpreter {
                         }
                     }
 
-                    state.data_registers[0xF] = pixel_cleared as u8;
+                    state.set_flag(pixel_cleared);
 
                     stdout.flush()?;
                 }
@@ -225,28 +217,27 @@ impl Chip8Interpreter {
                 [0xF, _, 0x1, 0xE] => {
                     let (result, overflow) = state
                         .index_register
-                        .overflowing_add(state.data_registers[register_x as usize] as u16);
+                        .overflowing_add(state.register(vx) as u16);
                     state.index_register = result;
-                    state.data_registers[0xF] = overflow as u8;
+                    state.set_flag(overflow);
                 }
                 // Convert and store Vx to decimal
                 [0xF, _, 0x3, 0x3] => {
-                    let value = state.data_registers[register_x as usize];
+                    let value = state.register(vx);
                     state.ram[state.index_register as usize] = value / 100;
                     state.ram[state.index_register as usize + 1] = value / 10 % 10;
                     state.ram[state.index_register as usize + 2] = value % 10;
                 }
                 // Store everything up until Vx
                 [0xF, _, 0x5, 0x5] => {
-                    for i in 0..=register_x {
-                        state.ram[(state.index_register + i as u16) as usize] =
-                            state.data_registers[i as usize];
+                    for i in 0..=vx {
+                        state.ram[(state.index_register + i as u16) as usize] = state.register(i);
                     }
                 }
                 // Load everything up until Vx
                 [0xF, _, 0x6, 0x5] => {
-                    for i in 0..=register_x {
-                        state.data_registers[i as usize] =
+                    for i in 0..=vx {
+                        *state.register_mut(i) =
                             state.ram[(state.index_register + i as u16) as usize];
                     }
                 }
@@ -257,7 +248,9 @@ impl Chip8Interpreter {
 
             let wait_time = (cpu_frame_time - time_passed).max(0.);
 
-            thread::sleep(Duration::from_secs_f32(wait_time));
+            if wait_time > 0. {
+                thread::sleep(Duration::from_secs_f32(wait_time));
+            }
         }
     }
 }
@@ -267,7 +260,7 @@ fn main() -> io::Result<()> {
         max_clock_speed: 700,
     };
 
-    interpreter.run("testroms/1-chip8-logo.ch8")?;
+    interpreter.run("testroms/3-corax+.ch8")?;
 
     Ok(())
 }

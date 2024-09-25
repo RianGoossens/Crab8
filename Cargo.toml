@@ -4,5 +4,3 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-crab8-core = { path = "crab8-core" }
-crab8-macros = { path = "crab8-macros" }

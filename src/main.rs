@@ -1,11 +1,27 @@
 use std::fs;
 
-use crab8_core::Chip8State;
-use crab8_macros::opcode;
+pub struct Chip8State {
+    pub data_registers: [u8; 16],
+    pub index_register: u16,
+    pub program_counter: u16,
+    pub stack_pointer: u8,
+    pub ram: [u8; 4096],
+    pub stack: [u16; 256],
+    pub display: [bool; 64 * 32],
+}
 
-#[opcode]
-pub fn test_me(value: u8, #[v0] a: u8, #[v1] b: u8, #[output] output: &mut u8) {
-    *output = 2 * a + b + value;
+impl Default for Chip8State {
+    fn default() -> Self {
+        Self {
+            data_registers: [0; 16],
+            index_register: 0,
+            program_counter: 0x200,
+            stack_pointer: 0,
+            ram: [0; 4096],
+            stack: [0; 256],
+            display: [false; 64 * 32],
+        }
+    }
 }
 
 fn main() {

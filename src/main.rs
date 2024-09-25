@@ -1,4 +1,12 @@
-use std::fs;
+use crossterm::{
+    cursor, queue,
+    style::{self, Stylize},
+    terminal,
+};
+use std::{
+    fs,
+    io::{self, stdout, Write},
+};
 
 pub struct Chip8State {
     pub data_registers: [u8; 16],
@@ -24,8 +32,9 @@ impl Default for Chip8State {
     }
 }
 
-fn main() {
+fn main() -> io::Result<()> {
     let program = fs::read("testroms/4-flags.ch8").expect("Could not read file.");
+    let mut stdout = stdout();
 
     let mut state = Chip8State::default();
 
@@ -170,18 +179,21 @@ fn main() {
                 }
                 state.data_registers[0xF] = pixel_cleared as u8;
 
-                println!("\n");
+                queue!(stdout, terminal::Clear(terminal::ClearType::All))?;
+
                 for row in 0..32 {
                     for col in 0..64 {
                         let display_index = (row as usize) * 64 + col as usize;
+                        queue!(stdout, cursor::MoveTo(col * 2, row))?;
                         if state.display[display_index] {
-                            print!("██");
+                            queue!(stdout, style::PrintStyledContent("██".yellow()))?
                         } else {
-                            print!("  ");
+                            queue!(stdout, style::PrintStyledContent("  ".black()))?
                         }
                     }
-                    println!();
                 }
+
+                stdout.flush()?;
             }
             // I += Vx
             [0xF, _, 0x1, 0xE] => {

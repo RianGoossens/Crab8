@@ -5,7 +5,7 @@ use crossterm::{
 };
 use std::{
     fs,
-    io::{self, stdout, Write},
+    io::{self, stdout, Stdout, Write},
     thread,
     time::{Duration, Instant},
 };
@@ -17,7 +17,6 @@ pub struct Chip8State {
     pub stack_pointer: u8,
     pub ram: [u8; 4096],
     pub stack: [u16; 256],
-    pub display: [bool; 64 * 32],
 }
 
 impl Default for Chip8State {
@@ -29,7 +28,6 @@ impl Default for Chip8State {
             stack_pointer: 0,
             ram: [0; 4096],
             stack: [0; 256],
-            display: [false; 64 * 32],
         }
     }
 }
@@ -54,6 +52,66 @@ impl Chip8State {
     }
 }
 
+pub trait Chip8Display {
+    fn new() -> Self;
+    fn clear(&mut self) -> io::Result<()>;
+    fn draw(&mut self, x: u8, y: u8, data: &[u8]) -> io::Result<bool>;
+    fn flush(&mut self) -> io::Result<()>;
+}
+
+pub struct CrossTermDisplay {
+    stdout: Stdout,
+    display: [bool; 64 * 32],
+}
+
+impl Chip8Display for CrossTermDisplay {
+    fn new() -> Self {
+        let mut stdout = stdout();
+        execute!(
+            stdout,
+            terminal::Clear(terminal::ClearType::All),
+            cursor::Hide
+        )
+        .expect("Could not use stdout");
+
+        Self {
+            stdout,
+            display: [false; 64 * 32],
+        }
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        queue!(self.stdout, terminal::Clear(terminal::ClearType::All))
+    }
+
+    fn draw(&mut self, x: u8, y: u8, data: &[u8]) -> io::Result<bool> {
+        let mut pixel_cleared = false;
+        for (i, to_draw) in data.iter().enumerate() {
+            let row = y as usize + i;
+            for j in 0..8 {
+                let col = x + j;
+                let flip = to_draw & (1 << (7 - j)) > 0;
+
+                let display_index = row * 64 + col as usize;
+                if self.display[display_index] && flip {
+                    pixel_cleared = true;
+                }
+                self.display[display_index] ^= flip;
+                queue!(self.stdout, cursor::MoveTo(col as u16 * 2, row as u16))?;
+                if self.display[display_index] {
+                    queue!(self.stdout, style::PrintStyledContent("██".yellow()))?
+                } else {
+                    queue!(self.stdout, style::PrintStyledContent("  ".black()))?
+                }
+            }
+        }
+        Ok(pixel_cleared)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.stdout.flush()
+    }
+}
+
 pub struct Chip8Interpreter {
     pub max_clock_speed: u32,
 }
@@ -67,21 +125,17 @@ impl Default for Chip8Interpreter {
 }
 
 impl Chip8Interpreter {
-    pub fn run(&self, path: &str) -> io::Result<()> {
+    pub fn run<D: Chip8Display>(self, path: &str) -> io::Result<()> {
         let program = fs::read(path).expect("Could not read file.");
-        let mut stdout = stdout();
 
         let mut state = Chip8State::default();
 
         state.load_program(program);
 
         let cpu_frame_time = 1. / self.max_clock_speed as f32;
+        let mut last_display_frame = Instant::now();
 
-        execute!(
-            stdout,
-            terminal::Clear(terminal::ClearType::All),
-            cursor::Hide
-        )?;
+        let mut display = D::new();
 
         loop {
             let start_cpu_frame_time = Instant::now();
@@ -105,7 +159,9 @@ impl Chip8Interpreter {
 
             match [nibble_0, nibble_1, nibble_2, nibble_3] {
                 //clear display
-                [0x0, 0x0, 0xE, 0x0] => state.display = [false; 64 * 32],
+                [0x0, 0x0, 0xE, 0x0] => {
+                    display.clear()?;
+                }
                 //return
                 [0x0, 0x0, 0xE, 0xE] => {
                     state.program_counter = state.stack[state.stack_pointer as usize];
@@ -187,31 +243,12 @@ impl Chip8Interpreter {
                 [0xD, _, _, _] => {
                     let vx = state.register(vx);
                     let vy = state.register(vy);
-                    let mut pixel_cleared = false;
-                    for i in 0..nibble_3 {
-                        let to_draw = state.ram[state.index_register as usize + i as usize];
-                        let row = vy + i;
-                        for j in 0..8 {
-                            let col = vx + j;
-                            let flip = to_draw & (1 << (7 - j)) > 0;
+                    let data = &state.ram[state.index_register as usize
+                        ..state.index_register as usize + nibble_3 as usize];
 
-                            let display_index = (row as usize) * 64 + col as usize;
-                            if state.display[display_index] && flip {
-                                pixel_cleared = true;
-                            }
-                            state.display[display_index] ^= flip;
-                            queue!(stdout, cursor::MoveTo(col as u16 * 2, row as u16))?;
-                            if state.display[display_index] {
-                                queue!(stdout, style::PrintStyledContent("██".yellow()))?
-                            } else {
-                                queue!(stdout, style::PrintStyledContent("  ".black()))?
-                            }
-                        }
-                    }
+                    let flag = display.draw(vx, vy, data)?;
 
-                    state.set_flag(pixel_cleared);
-
-                    stdout.flush()?;
+                    state.set_flag(flag);
                 }
                 // I += Vx
                 [0xF, _, 0x1, 0xE] => {
@@ -244,6 +281,11 @@ impl Chip8Interpreter {
                 _ => {}
             }
 
+            if last_display_frame.elapsed().as_secs_f32() > 1. / 60. {
+                display.flush()?;
+                last_display_frame = Instant::now();
+            }
+
             let time_passed = start_cpu_frame_time.elapsed().as_secs_f32();
 
             let wait_time = (cpu_frame_time - time_passed).max(0.);
@@ -260,7 +302,7 @@ fn main() -> io::Result<()> {
         max_clock_speed: 700,
     };
 
-    interpreter.run("testroms/3-corax+.ch8")?;
+    interpreter.run::<CrossTermDisplay>("testroms/Zero Demo [zeroZshadow, 2007].ch8")?;
 
     Ok(())
 }

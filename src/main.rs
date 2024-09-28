@@ -7,51 +7,14 @@ use crossterm::{
 };
 use std::{
     fs,
-    io::{self, stdout, Stdout, Write},
+    io::{self, stdout, ErrorKind, Stdout, Write},
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
-pub struct Chip8State {
-    pub data_registers: [u8; 16],
-    pub index_register: u16,
-    pub program_counter: u16,
-    pub stack_pointer: u8,
-    pub ram: [u8; 4096],
-    pub stack: [u16; 256],
-}
+pub mod state;
 
-impl Default for Chip8State {
-    fn default() -> Self {
-        Self {
-            data_registers: [0; 16],
-            index_register: 0,
-            program_counter: 0x200,
-            stack_pointer: 0,
-            ram: [0; 4096],
-            stack: [0; 256],
-        }
-    }
-}
-
-impl Chip8State {
-    pub fn load_program(&mut self, program: Vec<u8>) {
-        for (i, byte) in program.iter().enumerate() {
-            self.ram[0x200 + i] = *byte;
-        }
-    }
-
-    pub fn register(&self, register_index: u8) -> u8 {
-        self.data_registers[register_index as usize]
-    }
-
-    pub fn register_mut(&mut self, register_index: u8) -> &mut u8 {
-        &mut self.data_registers[register_index as usize]
-    }
-
-    pub fn set_flag(&mut self, flag: bool) {
-        *self.register_mut(0xF) = flag as u8;
-    }
-}
+pub use state::Chip8State;
 
 pub trait Chip8Display {
     fn new() -> Self;
@@ -119,32 +82,33 @@ impl Chip8Display for CrossTermDisplay {
 
 pub trait Chip8Keyboard {
     fn new() -> Self;
-    fn update_keystates(&mut self, max_duration_secs: f64) -> io::Result<()>;
+    fn update_keystates(&mut self, max_duration_microseconds: u64) -> io::Result<()>;
     fn is_key_down(&self, key: u8) -> bool;
-    fn block_until_key(&mut self) -> io::Result<u8>;
+    fn last_key_pressed(&self) -> Option<u8>;
 }
 
 pub struct CrossTermKeyboard {
-    key_states: [bool; 16],
+    key_states: u16,
+    last_key_pressed: Option<u8>,
 }
 
 fn crossterm_keymap(keycode: KeyCode) -> Option<u8> {
     match keycode {
-        KeyCode::Char('1') => Some(0x0),
-        KeyCode::Char('2') => Some(0x1),
-        KeyCode::Char('3') => Some(0x2),
-        KeyCode::Char('4') => Some(0x3),
+        KeyCode::Char('1') => Some(0x1),
+        KeyCode::Char('2') => Some(0x2),
+        KeyCode::Char('3') => Some(0x3),
+        KeyCode::Char('4') => Some(0xC),
         KeyCode::Char('q') => Some(0x4),
         KeyCode::Char('w') => Some(0x5),
         KeyCode::Char('e') => Some(0x6),
-        KeyCode::Char('r') => Some(0x7),
-        KeyCode::Char('a') => Some(0x8),
-        KeyCode::Char('s') => Some(0x9),
-        KeyCode::Char('d') => Some(0xA),
-        KeyCode::Char('f') => Some(0xB),
-        KeyCode::Char('z') => Some(0xC),
-        KeyCode::Char('x') => Some(0xD),
-        KeyCode::Char('c') => Some(0xE),
+        KeyCode::Char('r') => Some(0xD),
+        KeyCode::Char('a') => Some(0x7),
+        KeyCode::Char('s') => Some(0x8),
+        KeyCode::Char('d') => Some(0x9),
+        KeyCode::Char('f') => Some(0xE),
+        KeyCode::Char('z') => Some(0xA),
+        KeyCode::Char('x') => Some(0x0),
+        KeyCode::Char('c') => Some(0xB),
         KeyCode::Char('v') => Some(0xF),
         _ => None,
     }
@@ -153,26 +117,30 @@ fn crossterm_keymap(keycode: KeyCode) -> Option<u8> {
 impl Chip8Keyboard for CrossTermKeyboard {
     fn new() -> Self {
         Self {
-            key_states: [false; 16],
+            key_states: 0,
+            last_key_pressed: None,
         }
     }
 
-    fn update_keystates(&mut self, max_duration_secs: f64) -> io::Result<()> {
+    fn update_keystates(&mut self, max_duration_microseconds: u64) -> io::Result<()> {
         let start_time = Instant::now();
+        self.last_key_pressed = None;
         loop {
-            let leftover_time = max_duration_secs - start_time.elapsed().as_secs_f64();
-            //println!("{leftover_time}");
-            if leftover_time <= 0. {
+            let leftover_time =
+                max_duration_microseconds.saturating_sub(start_time.elapsed().as_micros() as u64);
+            if leftover_time == 0 {
                 break;
             }
-            let duration = Duration::from_secs_f64(leftover_time);
+            let duration = Duration::from_micros(leftover_time);
             if event::poll(duration)? {
                 if let Event::Key(KeyEvent { code, kind, .. }) = event::read()? {
                     if let Some(key) = crossterm_keymap(code) {
                         match kind {
-                            KeyEventKind::Press => self.key_states[key as usize] = true,
-                            KeyEventKind::Repeat => self.key_states[key as usize] = true,
-                            KeyEventKind::Release => self.key_states[key as usize] = false,
+                            KeyEventKind::Press | KeyEventKind::Repeat => {
+                                self.key_states |= 1 << key;
+                                self.last_key_pressed = Some(key)
+                            }
+                            KeyEventKind::Release => self.key_states &= !(1 << key),
                         }
                     }
                 }
@@ -182,22 +150,33 @@ impl Chip8Keyboard for CrossTermKeyboard {
     }
 
     fn is_key_down(&self, key: u8) -> bool {
-        self.key_states[key as usize]
+        self.key_states & (1 << key) > 0
     }
 
-    fn block_until_key(&mut self) -> io::Result<u8> {
-        loop {
-            let event = event::read()?;
-            if let Event::Key(KeyEvent {
-                code,
-                kind: KeyEventKind::Press,
-                ..
-            }) = event
-            {
-                if let Some(result) = crossterm_keymap(code) {
-                    return Ok(result);
-                }
-            }
+    fn last_key_pressed(&self) -> Option<u8> {
+        self.last_key_pressed
+    }
+}
+
+pub struct Timer {
+    interval: Duration,
+    last_tick: Instant,
+}
+
+impl Timer {
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_tick: Instant::now(),
+        }
+    }
+
+    pub fn tick(&mut self) -> bool {
+        if self.last_tick.elapsed() >= self.interval {
+            self.last_tick += self.interval;
+            true
+        } else {
+            false
         }
     }
 }
@@ -215,15 +194,17 @@ impl Default for Chip8Interpreter {
 }
 
 impl Chip8Interpreter {
-    pub fn run<D: Chip8Display, K: Chip8Keyboard>(self, path: &str) -> io::Result<()> {
+    pub fn run<D: Chip8Display, K: Chip8Keyboard, P: AsRef<Path>>(self, path: P) -> io::Result<()> {
         let program = fs::read(path).expect("Could not read file.");
-
+        self.run_program::<D, K>(&program)
+    }
+    pub fn run_program<D: Chip8Display, K: Chip8Keyboard>(self, program: &[u8]) -> io::Result<()> {
         let mut state = Chip8State::default();
 
         state.load_program(program);
 
-        let cpu_frame_time = 1. / self.max_clock_speed as f64;
-        let mut last_timer_frame = Instant::now();
+        let cpu_frame_time_micros = (1_000_000. / self.max_clock_speed as f64) as u64;
+        let mut timer = Timer::new(Duration::from_secs_f32(1. / 60.));
 
         let mut display = D::new();
         let mut keyboard = K::new();
@@ -361,7 +342,11 @@ impl Chip8Interpreter {
                 }
                 // Vx = get_key()
                 [0xF, _, 0x0, 0xA] => {
-                    *state.register_mut(vx) = keyboard.block_until_key()?;
+                    if let Some(last_key) = keyboard.last_key_pressed() {
+                        *state.register_mut(vx) = last_key;
+                    } else {
+                        state.program_counter -= 2;
+                    }
                 }
                 // I += Vx
                 [0xF, _, 0x1, 0xE] => {
@@ -392,23 +377,22 @@ impl Chip8Interpreter {
                     }
                 }
                 _ => {
-                    panic!(
+                    /*panic!(
                         "Unknown instruction {:01x}{:01x}{:01x}{:01x}",
                         nibble_0, nibble_1, nibble_2, nibble_3
-                    )
+                    )*/
                 }
             }
 
-            if last_timer_frame.elapsed().as_secs_f32() > 1. / 60. {
+            if timer.tick() {
                 display.flush()?;
-                last_timer_frame = Instant::now();
             }
 
-            let time_passed = start_cpu_frame_time.elapsed().as_secs_f64();
+            let time_passed = start_cpu_frame_time.elapsed().as_micros() as u64;
 
-            let wait_time = (cpu_frame_time - time_passed).max(0.);
+            let wait_time = cpu_frame_time_micros.saturating_sub(time_passed);
 
-            if wait_time >= 0. {
+            if wait_time > 0 {
                 keyboard.update_keystates(wait_time)?;
                 //thread::sleep(Duration::from_secs_f32(wait_time));
             }
@@ -416,14 +400,118 @@ impl Chip8Interpreter {
     }
 }
 
+fn rom_selector<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
+    let rom_paths = fs::read_dir(path)?;
+
+    let paths: Vec<_> = rom_paths
+        .map(|x| x.unwrap().path())
+        .filter(|x| {
+            if let Some(extension) = x.extension() {
+                extension == "ch8"
+            } else {
+                false
+            }
+        })
+        .collect();
+
+    let mut stdout = stdout();
+    execute!(
+        stdout,
+        terminal::Clear(terminal::ClearType::All),
+        cursor::Hide
+    )?;
+
+    let mut selected_index: usize = 0;
+    let mut scroll_value = 0;
+    let mut needs_redraw = true;
+    loop {
+        let (_cols, rows) = terminal::size()?;
+        if needs_redraw {
+            queue!(
+                stdout,
+                terminal::Clear(terminal::ClearType::All),
+                cursor::MoveTo(0, 0),
+                style::PrintStyledContent(
+                    "🦀🎱 Crab8 by Rian Goossens
+----------------------------"
+                        .bold()
+                )
+            )?;
+            for i in 0..(rows as usize - 2) {
+                let index = scroll_value + i;
+                if index >= paths.len() {
+                    break;
+                }
+                let filename = paths[index].file_name().unwrap().to_str().unwrap();
+                let line = format!("> {filename}");
+                let mut content = line.white();
+                if scroll_value + i == selected_index {
+                    content = content.black().on_white();
+                }
+                queue!(
+                    stdout,
+                    cursor::MoveTo(0, i as u16 + 2),
+                    style::PrintStyledContent(content)
+                )?;
+            }
+        }
+
+        stdout.flush()?;
+        needs_redraw = false;
+
+        if event::poll(Duration::from_secs(1))? {
+            needs_redraw = true;
+            if let Event::Key(KeyEvent {
+                code,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            }) = event::read()?
+            {
+                match code {
+                    KeyCode::Char('w') | KeyCode::Up => {
+                        if scroll_value == 0 && selected_index == 0 {
+                            scroll_value = (paths.len() as i32 - rows as i32 + 2).max(0) as usize;
+                        } else if scroll_value == selected_index {
+                            scroll_value = scroll_value.saturating_sub(1);
+                        }
+                        if selected_index == 0 {
+                            selected_index = paths.len() - 1;
+                        } else {
+                            selected_index -= 1;
+                        }
+                    }
+                    KeyCode::Char('s') | KeyCode::Down => {
+                        selected_index = (selected_index + 1) % paths.len();
+
+                        if selected_index == 0 {
+                            scroll_value = 0;
+                        } else if selected_index >= scroll_value + rows as usize - 2 {
+                            scroll_value += 1;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        break;
+                    }
+                    KeyCode::Esc => {
+                        return Err(ErrorKind::Interrupted.into());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok(paths[selected_index].clone())
+}
+
 fn main() -> io::Result<()> {
+    let path = rom_selector("./testroms")?;
+
     let interpreter = Chip8Interpreter {
-        max_clock_speed: 1_000_000,
+        max_clock_speed: 1000,
     };
 
-    interpreter.run::<CrossTermDisplay, CrossTermKeyboard>(
-        "testroms/Sierpinski [Sergey Naydenov, 2010].ch8",
-    )?;
+    interpreter.run::<CrossTermDisplay, CrossTermKeyboard, _>(path)?;
 
     Ok(())
 }

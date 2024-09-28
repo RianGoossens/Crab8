@@ -5,6 +5,7 @@ use crossterm::{
     style::{self, Stylize},
     terminal,
 };
+use rand::{thread_rng, Rng};
 use std::{
     fs,
     io::{self, stdout, ErrorKind, Stdout, Write},
@@ -46,9 +47,39 @@ impl Chip8Display for CrossTermDisplay {
 
     fn clear(&mut self) -> io::Result<()> {
         self.display = [false; 64 * 32];
-        queue!(self.stdout, terminal::Clear(terminal::ClearType::All))
+        queue!(
+            self.stdout,
+            terminal::Clear(terminal::ClearType::All),
+            cursor::MoveTo(0, 0)
+        )
     }
 
+    // fn draw(&mut self, x: u8, y: u8, data: &[u8]) -> io::Result<bool> {
+    //     let mut pixel_cleared = false;
+    //     for (i, to_draw) in data.iter().enumerate() {
+    //         let row = y as usize + i;
+    //         for j in 0..8 {
+    //             let col = x + j;
+    //             let flip = to_draw & (1 << (7 - j)) > 0;
+
+    //             let display_index = row * 64 + col as usize;
+    //             if display_index >= self.display.len() {
+    //                 break;
+    //             }
+    //             if self.display[display_index] && flip {
+    //                 pixel_cleared = true;
+    //             }
+    //             self.display[display_index] ^= flip;
+    //             queue!(self.stdout, cursor::MoveTo(col as u16 * 2, row as u16))?;
+    //             if self.display[display_index] {
+    //                 queue!(self.stdout, style::PrintStyledContent("██".yellow()))?
+    //             } else {
+    //                 queue!(self.stdout, style::PrintStyledContent("  ".black()))?
+    //             }
+    //         }
+    //     }
+    //     Ok(pixel_cleared)
+    // }
     fn draw(&mut self, x: u8, y: u8, data: &[u8]) -> io::Result<bool> {
         let mut pixel_cleared = false;
         for (i, to_draw) in data.iter().enumerate() {
@@ -65,12 +96,32 @@ impl Chip8Display for CrossTermDisplay {
                     pixel_cleared = true;
                 }
                 self.display[display_index] ^= flip;
-                queue!(self.stdout, cursor::MoveTo(col as u16 * 2, row as u16))?;
-                if self.display[display_index] {
-                    queue!(self.stdout, style::PrintStyledContent("██".yellow()))?
-                } else {
-                    queue!(self.stdout, style::PrintStyledContent("  ".black()))?
+            }
+        }
+        for hrow in 0..16 {
+            for hcol in 0..32 {
+                let mut block_index: u8 = 0;
+
+                for i in 0..=1 {
+                    for j in 0..=1 {
+                        let display_index = ((2 * hrow + i) * 64 + (2 * hcol + j)) as usize;
+                        if self.display[display_index] {
+                            block_index ^= 1 << (i * 2 + j);
+                        }
+                    }
                 }
+                assert!(block_index < 16, "{block_index:04b}");
+
+                const BLOCK_CHARACTERS: [&str; 16] = [
+                    "  ", "▀ ", " ▀", "▀▀", "▄ ", "█ ", "▄▀", "█▀", " ▄", "▀▄", " █", "▀█", "▄▄",
+                    "█▄", "▄█", "██",
+                ];
+                let block_character = BLOCK_CHARACTERS[block_index as usize];
+                queue!(
+                    self.stdout,
+                    cursor::MoveTo(hcol as u16 * 2, hrow as u16),
+                    style::PrintStyledContent(block_character.yellow())
+                )?;
             }
         }
         Ok(pixel_cleared)
@@ -136,11 +187,14 @@ impl Chip8Keyboard for CrossTermKeyboard {
                 if let Event::Key(KeyEvent { code, kind, .. }) = event::read()? {
                     if let Some(key) = crossterm_keymap(code) {
                         match kind {
-                            KeyEventKind::Press | KeyEventKind::Repeat => {
+                            KeyEventKind::Press => {
+                                if self.key_states & 1 << key == 0 {
+                                    self.last_key_pressed = Some(key);
+                                }
                                 self.key_states |= 1 << key;
-                                self.last_key_pressed = Some(key)
                             }
                             KeyEventKind::Release => self.key_states &= !(1 << key),
+                            KeyEventKind::Repeat => {}
                         }
                     }
                 }
@@ -204,10 +258,12 @@ impl Chip8Interpreter {
         state.load_program(program);
 
         let cpu_frame_time_micros = (1_000_000. / self.max_clock_speed as f64) as u64;
+        let mut next_cpu_frame = Instant::now() + Duration::from_micros(cpu_frame_time_micros);
         let mut timer = Timer::new(Duration::from_secs_f32(1. / 60.));
 
         let mut display = D::new();
         let mut keyboard = K::new();
+        let mut rng = thread_rng();
 
         loop {
             let start_cpu_frame_time = Instant::now();
@@ -317,6 +373,10 @@ impl Chip8Interpreter {
                 }
                 //I = address
                 [0xA, _, _, _] => state.index_register = address,
+                // Jump to NNN + v0
+                [0xB, _, _, _] => state.program_counter = state.register(0x0) as u16 + address,
+                // Vx = rand() & NN
+                [0xC, _, _, _] => *state.register_mut(vx) = byte_b & rng.gen::<u8>(),
                 //Display sprite
                 [0xD, _, _, _] => {
                     let vx = state.register(vx);
@@ -340,6 +400,10 @@ impl Chip8Interpreter {
                         state.program_counter += 2;
                     }
                 }
+                // Vx = delay timer
+                [0xF, _, 0x0, 0x7] => {
+                    *state.register_mut(vx) = state.delay_timer;
+                }
                 // Vx = get_key()
                 [0xF, _, 0x0, 0xA] => {
                     if let Some(last_key) = keyboard.last_key_pressed() {
@@ -348,6 +412,14 @@ impl Chip8Interpreter {
                         state.program_counter -= 2;
                     }
                 }
+                // Set delay timer to vx
+                [0xF, _, 0x1, 0x5] => {
+                    state.delay_timer = state.register(vx);
+                }
+                // Set sound timer to vx
+                [0xF, _, 0x1, 0x8] => {
+                    state.sound_timer = state.register(vx);
+                }
                 // I += Vx
                 [0xF, _, 0x1, 0xE] => {
                     let (result, overflow) = state
@@ -355,6 +427,10 @@ impl Chip8Interpreter {
                         .overflowing_add(state.register(vx) as u16);
                     state.index_register = result;
                     state.set_flag(overflow);
+                }
+                // I = Vx'th character index
+                [0xF, _, 0x2, 0x9] => {
+                    state.index_register = state.register(vx) as u16 * 5;
                 }
                 // Convert and store Vx to decimal
                 [0xF, _, 0x3, 0x3] => {
@@ -377,25 +453,34 @@ impl Chip8Interpreter {
                     }
                 }
                 _ => {
-                    /*panic!(
+                    display.clear()?;
+                    display.flush()?;
+                    panic!(
                         "Unknown instruction {:01x}{:01x}{:01x}{:01x}",
                         nibble_0, nibble_1, nibble_2, nibble_3
-                    )*/
+                    )
                 }
             }
 
             if timer.tick() {
+                if state.delay_timer > 0 {
+                    state.delay_timer -= 1;
+                }
+                if state.sound_timer > 0 {
+                    state.sound_timer -= 1;
+                }
                 display.flush()?;
             }
 
-            let time_passed = start_cpu_frame_time.elapsed().as_micros() as u64;
+            let now = Instant::now();
 
-            let wait_time = cpu_frame_time_micros.saturating_sub(time_passed);
+            let time_left = next_cpu_frame - now;
 
-            if wait_time > 0 {
-                keyboard.update_keystates(wait_time)?;
-                //thread::sleep(Duration::from_secs_f32(wait_time));
-            }
+            let time_left = time_left.max(Duration::ZERO);
+            next_cpu_frame += Duration::from_micros(cpu_frame_time_micros);
+
+            keyboard.update_keystates(time_left.as_micros() as u64)?;
+            //thread::sleep(Duration::from_secs_f32(wait_time));
         }
     }
 }

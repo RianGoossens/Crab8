@@ -77,8 +77,6 @@ impl<D: Chip8Display, K: Chip8Keyboard, B: Chip8Beeper> Chip8Interpreter<D, K, B
 
             let address = ((nibble_1 as u16) << 8) | byte_b as u16;
 
-            let vx = nibble_1;
-            let vy = nibble_2;
             let immediate_value = byte_b;
 
             match [nibble_0, nibble_1, nibble_2, nibble_3] {
@@ -100,69 +98,69 @@ impl<D: Chip8Display, K: Chip8Keyboard, B: Chip8Beeper> Chip8Interpreter<D, K, B
                     state.program_counter = address;
                 }
                 //skip if Vx == NN
-                [0x3, _, _, _] => {
-                    if state.register(vx) == byte_b {
+                [0x3, vx, _, _] => {
+                    if state.register(vx) == immediate_value {
                         state.program_counter += 2;
                     }
                 }
                 //skip if Vx != NN
-                [0x4, _, _, _] => {
-                    if state.register(vx) != byte_b {
+                [0x4, vx, _, _] => {
+                    if state.register(vx) != immediate_value {
                         state.program_counter += 2;
                     }
                 }
                 //skip if Vx == Vy
-                [0x5, _, _, 0x0] => {
+                [0x5, vx, vy, 0x0] => {
                     if state.register(vx) == state.register(vy) {
                         state.program_counter += 2;
                     }
                 }
                 //Vx = value
-                [0x6, _, _, _] => *state.register_mut(vx) = immediate_value,
+                [0x6, vx, _, _] => *state.register_mut(vx) = immediate_value,
                 //Vx += value
-                [0x7, _, _, _] => {
+                [0x7, vx, _, _] => {
                     *state.register_mut(vx) = state.register(vx).wrapping_add(immediate_value)
                 }
                 //Vx = Vy
-                [0x8, _, _, 0x0] => *state.register_mut(vx) = state.register(vy),
+                [0x8, vx, vy, 0x0] => *state.register_mut(vx) = state.register(vy),
                 //Vx |= Vy
-                [0x8, _, _, 0x1] => *state.register_mut(vx) |= state.register(vy),
+                [0x8, vx, vy, 0x1] => *state.register_mut(vx) |= state.register(vy),
                 //Vx &= Vy
-                [0x8, _, _, 0x2] => *state.register_mut(vx) &= state.register(vy),
+                [0x8, vx, vy, 0x2] => *state.register_mut(vx) &= state.register(vy),
                 //Vx ^= Vy
-                [0x8, _, _, 0x3] => *state.register_mut(vx) ^= state.register(vy),
+                [0x8, vx, vy, 0x3] => *state.register_mut(vx) ^= state.register(vy),
                 //Vx += Vy
-                [0x8, _, _, 0x4] => {
+                [0x8, vx, vy, 0x4] => {
                     let (result, overflow) = state.register(vx).overflowing_add(state.register(vy));
                     *state.register_mut(vx) = result;
                     state.set_flag(overflow);
                 }
                 //Vx -= Vy
-                [0x8, _, _, 0x5] => {
+                [0x8, vx, vy, 0x5] => {
                     let (result, borrow) = state.register(vx).overflowing_sub(state.register(vy));
                     *state.register_mut(vx) = result;
                     state.set_flag(!borrow);
                 }
                 //Vx >>= 1
-                [0x8, _, _, 0x6] => {
+                [0x8, vx, _, 0x6] => {
                     let (result, borrow) = state.register(vx).overflowing_shr(1);
                     *state.register_mut(vx) = result;
                     state.set_flag(!borrow);
                 }
                 //Vx = Vy - Vx
-                [0x8, _, _, 0x7] => {
+                [0x8, vx, vy, 0x7] => {
                     let (result, borrow) = state.register(vy).overflowing_sub(state.register(vx));
                     *state.register_mut(vx) = result;
                     state.set_flag(!borrow);
                 }
                 //Vx <<= 1
-                [0x8, _, _, 0xE] => {
+                [0x8, vx, _, 0xE] => {
                     let (result, borrow) = state.register(vx).overflowing_shl(1);
                     *state.register_mut(vx) = result;
                     state.set_flag(!borrow);
                 }
                 // Skip if Vx != Vy
-                [0x9, _, _, 0x0] => {
+                [0x9, vx, vy, 0x0] => {
                     if state.register(vx) != state.register(vy) {
                         state.program_counter += 2;
                     }
@@ -172,9 +170,9 @@ impl<D: Chip8Display, K: Chip8Keyboard, B: Chip8Beeper> Chip8Interpreter<D, K, B
                 // Jump to NNN + v0
                 [0xB, _, _, _] => state.program_counter = state.register(0x0) as u16 + address,
                 // Vx = rand() & NN
-                [0xC, _, _, _] => *state.register_mut(vx) = byte_b & rng.gen::<u8>(),
+                [0xC, vx, _, _] => *state.register_mut(vx) = immediate_value & rng.gen::<u8>(),
                 //Display sprite
-                [0xD, _, _, _] => {
+                [0xD, vx, vy, _] => {
                     let vx = state.register(vx);
                     let vy = state.register(vy);
                     let data = &state.ram[state.index_register as usize
@@ -185,23 +183,23 @@ impl<D: Chip8Display, K: Chip8Keyboard, B: Chip8Beeper> Chip8Interpreter<D, K, B
                     state.set_flag(flag);
                 }
                 // skip if key()
-                [0xE, _, 0x9, 0xE] => {
+                [0xE, vx, 0x9, 0xE] => {
                     if self.keyboard.is_key_down(state.register(vx)) {
                         state.program_counter += 2;
                     }
                 }
                 // skip if !key()
-                [0xE, _, 0xA, 0x1] => {
+                [0xE, vx, 0xA, 0x1] => {
                     if !self.keyboard.is_key_down(state.register(vx)) {
                         state.program_counter += 2;
                     }
                 }
                 // Vx = delay timer
-                [0xF, _, 0x0, 0x7] => {
+                [0xF, vx, 0x0, 0x7] => {
                     *state.register_mut(vx) = state.delay_timer;
                 }
                 // Vx = get_key()
-                [0xF, _, 0x0, 0xA] => {
+                [0xF, vx, 0x0, 0xA] => {
                     if let Some(last_key) = self.keyboard.last_key_pressed() {
                         *state.register_mut(vx) = last_key;
                     } else {
@@ -209,15 +207,15 @@ impl<D: Chip8Display, K: Chip8Keyboard, B: Chip8Beeper> Chip8Interpreter<D, K, B
                     }
                 }
                 // Set delay timer to vx
-                [0xF, _, 0x1, 0x5] => {
+                [0xF, vx, 0x1, 0x5] => {
                     state.delay_timer = state.register(vx);
                 }
                 // Set sound timer to vx
-                [0xF, _, 0x1, 0x8] => {
+                [0xF, vx, 0x1, 0x8] => {
                     state.sound_timer = state.register(vx);
                 }
                 // I += Vx
-                [0xF, _, 0x1, 0xE] => {
+                [0xF, vx, 0x1, 0xE] => {
                     let (result, overflow) = state
                         .index_register
                         .overflowing_add(state.register(vx) as u16);
@@ -225,24 +223,24 @@ impl<D: Chip8Display, K: Chip8Keyboard, B: Chip8Beeper> Chip8Interpreter<D, K, B
                     state.set_flag(overflow);
                 }
                 // I = Vx'th character index
-                [0xF, _, 0x2, 0x9] => {
+                [0xF, vx, 0x2, 0x9] => {
                     state.index_register = state.register(vx) as u16 * 5;
                 }
                 // Convert and store Vx to decimal
-                [0xF, _, 0x3, 0x3] => {
+                [0xF, vx, 0x3, 0x3] => {
                     let value = state.register(vx);
                     state.ram[state.index_register as usize] = value / 100;
                     state.ram[state.index_register as usize + 1] = value / 10 % 10;
                     state.ram[state.index_register as usize + 2] = value % 10;
                 }
                 // Store everything up until Vx
-                [0xF, _, 0x5, 0x5] => {
+                [0xF, vx, 0x5, 0x5] => {
                     for i in 0..=vx {
                         state.ram[(state.index_register + i as u16) as usize] = state.register(i);
                     }
                 }
                 // Load everything up until Vx
-                [0xF, _, 0x6, 0x5] => {
+                [0xF, vx, 0x6, 0x5] => {
                     for i in 0..=vx {
                         *state.register_mut(i) =
                             state.ram[(state.index_register + i as u16) as usize];

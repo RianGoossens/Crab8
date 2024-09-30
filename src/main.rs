@@ -1,4 +1,4 @@
-use cpal::{FromSample, Sample, Stream, StreamConfig};
+use cpal::{BuildStreamError, Device, FromSample, SizedSample, Stream, StreamConfig};
 use crab8_core::{Chip8Beeper, Chip8Display, Chip8Interpreter, Chip8Keyboard};
 use crossterm::{
     cursor,
@@ -295,7 +295,6 @@ impl Chip8Beeper for CpalBeeper {
             .expect("no supported config?!")
             .with_max_sample_rate();
 
-        let err_fn = |err| eprintln!("an error occurred on the output audio stream: {}", err);
         let sample_format = supported_config.sample_format();
         let config: StreamConfig = supported_config.into();
 
@@ -304,47 +303,39 @@ impl Chip8Beeper for CpalBeeper {
         let num_samples_per_second = config.sample_rate.0;
         let num_samples_per_repetition = num_samples_per_second / FREQ;
 
-        fn create_callback<T: Sample + FromSample<f32>>(
+        fn create_stream<T: SizedSample + FromSample<f32>>(
+            device: &Device,
+            config: &StreamConfig,
             volume: f32,
             num_samples_per_repetition: u32,
-        ) -> impl FnMut(&mut [T], &cpal::OutputCallbackInfo) {
+        ) -> Result<Stream, BuildStreamError> {
             let mut index = 0;
             let float_samples: Vec<_> = (0..num_samples_per_repetition)
                 .map(|i| (i as f32 / num_samples_per_repetition as f32 * TAU).sin() * volume)
                 .collect();
-            move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+            let callback = move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
                 for sample in data {
                     *sample = T::from_sample(float_samples[index as usize]);
                     index = (index + 1) % num_samples_per_repetition;
                 }
-            }
+            };
+            let err_fn = |err| eprintln!("an error occurred on the output audio stream: {}", err);
+            device.build_output_stream(config, callback, err_fn, None)
         }
 
         let stream = match sample_format {
-            SampleFormat::F32 => device.build_output_stream(
-                &config,
-                create_callback::<f32>(volume, num_samples_per_repetition),
-                err_fn,
-                None,
-            ),
-            SampleFormat::I16 => device.build_output_stream(
-                &config,
-                create_callback::<i16>(volume, num_samples_per_repetition),
-                err_fn,
-                None,
-            ),
-            SampleFormat::U16 => device.build_output_stream(
-                &config,
-                create_callback::<u16>(volume, num_samples_per_repetition),
-                err_fn,
-                None,
-            ),
-            SampleFormat::U8 => device.build_output_stream(
-                &config,
-                create_callback::<u8>(volume, num_samples_per_repetition),
-                err_fn,
-                None,
-            ),
+            SampleFormat::F32 => {
+                create_stream::<f32>(&device, &config, volume, num_samples_per_repetition)
+            }
+            SampleFormat::I16 => {
+                create_stream::<i16>(&device, &config, volume, num_samples_per_repetition)
+            }
+            SampleFormat::U16 => {
+                create_stream::<u16>(&device, &config, volume, num_samples_per_repetition)
+            }
+            SampleFormat::U8 => {
+                create_stream::<u8>(&device, &config, volume, num_samples_per_repetition)
+            }
             sample_format => panic!("Unsupported sample format '{sample_format}'"),
         }
         .unwrap();
@@ -373,7 +364,7 @@ fn main() -> io::Result<()> {
     let display = CrossTermDisplay::new();
     let keyboard = CrossTermKeyboard::new();
     let beeper = CpalBeeper::new(0.1);
-    let interpreter = Chip8Interpreter::new(1000, display, keyboard, beeper);
+    let interpreter = Chip8Interpreter::new(700, display, keyboard, beeper);
 
     interpreter.run(path)?;
 

@@ -194,8 +194,14 @@ name = "crab8"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "crab8-core",
  "crossterm",
- "dasp_sample",
+]
+
+[[package]]
+name = "crab8-core"
+version = "0.1.0"
+dependencies = [
  "rand",
 ]
 

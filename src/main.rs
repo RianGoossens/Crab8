@@ -1,3 +1,4 @@
+use cpal::{FromSample, Sample, Stream, StreamConfig};
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -7,6 +8,7 @@ use crossterm::{
 };
 use rand::{thread_rng, Rng};
 use std::{
+    f32::consts::TAU,
     fs,
     io::{self, stdout, ErrorKind, Stdout, Write},
     path::{Path, PathBuf},
@@ -263,11 +265,10 @@ impl Chip8Interpreter {
 
         let mut display = D::new();
         let mut keyboard = K::new();
+        let beeper = Beeper::new(0.1);
         let mut rng = thread_rng();
 
         loop {
-            let start_cpu_frame_time = Instant::now();
-
             //fetch
             let byte_a = state.ram[state.program_counter as usize];
             let byte_b = state.ram[state.program_counter as usize + 1];
@@ -468,6 +469,9 @@ impl Chip8Interpreter {
                 }
                 if state.sound_timer > 0 {
                     state.sound_timer -= 1;
+                    beeper.play();
+                } else {
+                    beeper.pause();
                 }
                 display.flush()?;
             }
@@ -480,7 +484,6 @@ impl Chip8Interpreter {
             next_cpu_frame += Duration::from_micros(cpu_frame_time_micros);
 
             keyboard.update_keystates(time_left.as_micros() as u64)?;
-            //thread::sleep(Duration::from_secs_f32(wait_time));
         }
     }
 }
@@ -587,6 +590,98 @@ fn rom_selector<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
     }
 
     Ok(paths[selected_index].clone())
+}
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::SampleFormat;
+pub struct Beeper {
+    stream: Stream,
+}
+
+impl Beeper {
+    pub fn new(volume: f32) -> Self {
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .expect("no output device available");
+        let mut supported_configs_range = device
+            .supported_output_configs()
+            .expect("error while querying configs");
+        let supported_config = supported_configs_range
+            .next()
+            .expect("no supported config?!")
+            .with_max_sample_rate();
+
+        let err_fn = |err| eprintln!("an error occurred on the output audio stream: {}", err);
+        let sample_format = supported_config.sample_format();
+        let config: StreamConfig = supported_config.into();
+
+        const FREQ: u32 = 440;
+
+        let num_samples_per_second = config.sample_rate.0;
+        let num_samples_per_repetition = num_samples_per_second / FREQ;
+
+        fn create_callback<T: Sample + FromSample<f32>>(
+            volume: f32,
+            num_samples_per_repetition: u32,
+        ) -> impl FnMut(&mut [T], &cpal::OutputCallbackInfo) {
+            let mut index = 0;
+            let float_samples: Vec<_> = (0..num_samples_per_repetition)
+                .map(|i| (i as f32 / num_samples_per_repetition as f32 * TAU).sin() * volume)
+                .collect();
+            move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+                for sample in data {
+                    *sample = T::from_sample(float_samples[index as usize]);
+                    index = (index + 1) % num_samples_per_repetition;
+                }
+            }
+        }
+
+        let stream = match sample_format {
+            SampleFormat::F32 => device.build_output_stream(
+                &config,
+                create_callback::<f32>(volume, num_samples_per_repetition),
+                err_fn,
+                None,
+            ),
+            SampleFormat::I16 => device.build_output_stream(
+                &config,
+                create_callback::<i16>(volume, num_samples_per_repetition),
+                err_fn,
+                None,
+            ),
+            SampleFormat::U16 => device.build_output_stream(
+                &config,
+                create_callback::<u16>(volume, num_samples_per_repetition),
+                err_fn,
+                None,
+            ),
+            SampleFormat::U8 => device.build_output_stream(
+                &config,
+                create_callback::<u8>(volume, num_samples_per_repetition),
+                err_fn,
+                None,
+            ),
+            sample_format => panic!("Unsupported sample format '{sample_format}'"),
+        }
+        .unwrap();
+
+        Self { stream }
+    }
+
+    pub fn play(&self) {
+        self.stream.play().unwrap()
+    }
+
+    pub fn pause(&self) {
+        self.stream.pause().unwrap()
+    }
+}
+
+impl Drop for Beeper {
+    fn drop(&mut self) {
+        self.pause();
+    }
 }
 
 fn main() -> io::Result<()> {
